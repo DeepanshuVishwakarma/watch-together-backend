@@ -1,0 +1,460 @@
+const User = require("../models/User");
+const RoomServices = require("../services/index");
+
+const createRoom = async (req, res) => {
+  try {
+    const email = req?.user?.email;
+    const user = await User.findOne({ email: email });
+    const isPrivate = req.body?.isPrivate ? req.body.isPrivate : false;
+
+    if (user.inRoom) {
+      return res.status(400).json({
+        success: false,
+        message: "User is already in a room",
+      });
+    }
+
+    const response = await RoomServices.createRoom(user._id, isPrivate);
+
+    if (response.success) {
+      return res.status(201).json({
+        success: true,
+        message: "Room created successfully",
+        data: response.data,
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to create room",
+        error: response.error,
+      });
+    }
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: err.message,
+    });
+  }
+};
+
+const addMember = async (req, res) => {
+  try {
+    const user_to_be_added = req.params.user;
+    const email = req?.user?.email;
+    const user = await User.findOne({ email: email });
+
+    //can be done eaily through sockets
+    // fetch users socketid and then send him add request
+    // on reciving of add request ,reciver will send and join room request
+  } catch (err) {}
+};
+const askForRoomOwnership = async (req, res) => {
+  try {
+    const email = req?.body?.email;
+    const user = await User.findOne({ email: email });
+
+    // this should not occur since the the usre who has joined theroom
+    // will be able to send this request
+    // just an incase condition / like postman
+
+    if (!user.inRoom) {
+      return res.status().json({
+        success: false,
+        message: "Join room first",
+      });
+    }
+
+    const roomId = user.inRoom;
+
+    const Room = await Room.findOne({ objectId: roomId });
+    console.log("Room found ", Room);
+
+    const Owner_objectId = Room.roomAdmin.id;
+    const Owner = await User.findOne({ objectId: Owner_objectId });
+
+    const Owner_socketId = Owner.socketId;
+
+    const respons = await RoomServices.askForRoomOwnership(roomId, userId);
+
+    //if response is 200 only then
+    const { io } = req.io;
+    io.to(Owner_socketId).emit("requesting-for-ownership", message);
+
+    return res.status(200).json({
+      success: true,
+      message: "Requested for ownership",
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err,
+      message: err.message,
+    });
+  }
+};
+
+const joinRoom = async (req, res) => {
+  try {
+    // check if user is already in a room
+    const email = req?.user?.email;
+    const user = await User.findOne({ email: email });
+    const roomId = req.params.id;
+    const room = await Room.findOne({ objectId: roomId });
+
+    if (user.inRoom) {
+      return res.status(400).json({
+        success: false,
+        message: "User is already in a room",
+      });
+    }
+
+    // determine if the room is private
+    const isPrivate = req.body?.isPrivate ? req.body.isPrivate : false;
+
+    // if the room is private, send a request to the room admin for joining the room
+    if (isPrivate) {
+      const ownerId = room?.roomAdmin?.id;
+      if (!ownerId) {
+        return res.status(404).json({
+          success: false,
+          message: "Owner could not be found",
+        });
+      }
+      const owner = await User.findOne({ objectId: ownerId });
+      const ownerSocketId = owner?.socketId;
+
+      if (!ownerSocketId) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "Request cannot be sent to the room owner, can't find socket ID",
+        });
+      }
+
+      const { io } = req;
+      // emit the join request to the room admin
+      io.to(ownerSocketId).emit(
+        "requesting-for-joining-room",
+        { user },
+        (ack) => {
+          if (ack) {
+            // if acknowledgment returns true, push the user's objectId into the room model
+            room.users.push(user._id);
+            room.save();
+
+            // update user's inRoom status
+            user.inRoom = true;
+            user.save();
+
+            return res.status(200).json({
+              success: true,
+              message: "Request to join room has been sent",
+            });
+          } else {
+            // if acknowledgment returns false, request denied
+            return res.status(403).json({
+              success: false,
+              message: "Request denied by the room admin",
+            });
+          }
+        }
+      );
+    } else {
+      // if not private, directly insert the user into room.users
+      room.users.push(user._id);
+      room.save();
+
+      // Update user's inRoom status
+      user.inRoom = true;
+      user.save();
+
+      const { io } = req;
+      // Broadcast a message to everyone that a new user joined
+      for (const participantId of room.users) {
+        const participant = await User.findOne({ objectId: participantId });
+        const participantSocketId = participant?.socketId;
+        io.to(participantSocketId).emit("new-user-joined", { user });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "User has joined the room",
+      });
+    }
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err,
+      message: err.message,
+    });
+  }
+};
+const leaveRoom = async (req, res) => {
+  try {
+    const email = req?.user?.email;
+    const user = await User.findOne({ email: email });
+
+    const roomId = user.inRoom;
+    if (!roomId) {
+      return res.status().json({
+        success: false,
+        message: "User is not in any room",
+      });
+    } else {
+      const room = await Room.findOne({ objectId: roomId });
+      // querry , find the user's _id inside room.user and delte it from there ,
+      // and inside user model , user.inRoom = null ,
+      const participants = room.users;
+      for (const participantId of participants) {
+        const participant = await User.findOne({ objectId: participantId });
+        const participantSocketId = participant?.socketId;
+        io.to(participantSocketId).emit("a-user-left-the-room", { user });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "room left successfully",
+      });
+    }
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err,
+      message: err.message,
+    });
+  }
+};
+const deleteRoom = async (req, res) => {
+  try {
+    const email = req?.user?.email;
+    const user = await User.findOne({ email: email });
+    const { io } = req;
+    const roomId = user.inRoom;
+
+    if (!roomId) {
+      return res.status(400).json({
+        success: false,
+        message: "User is not in any room ",
+      });
+    }
+
+    const room = await Room.findOne({ objectId: roomId });
+    const ownerId = room?.roomAdmin?.id;
+    if (ownerId !== user._id) {
+      return res.status(400).json({
+        success: false,
+        message: "unauthrized request",
+      });
+    }
+
+    for (const participantId of room.users) {
+      const participant = await User.findOne({ objectId: participantId });
+      const participantSocketId = participant?.socketId;
+      io.to(participantSocketId).emit("room-deleted");
+    }
+    // delte the room from the database
+    return res.status(200).json({
+      success: true,
+      message: "User has joined the room",
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err,
+      message: err.message,
+    });
+  }
+};
+
+const removeMember = async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required",
+      });
+    }
+
+    const userToRemove = await User.findOne({ _id: id });
+    if (!userToRemove) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    const email = req?.user?.email;
+    const user = await User.findOne({ email: email });
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    const roomId = user.inRoom;
+    if (!roomId) {
+      return res.status(400).json({
+        success: false,
+        message: "User is not in any room",
+      });
+    }
+
+    const room = await Room.findOne({ _id: roomId });
+    if (!room) {
+      return res.status(404).json({
+        success: false,
+        message: "Room not found",
+      });
+    }
+
+    const ownerId = room.roomAdmin.id;
+    if (ownerId.toString() !== user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized request",
+      });
+    }
+
+    const userIndex = room.users.findIndex(
+      (user) => user.toString() === userToRemove._id.toString()
+    );
+    if (userIndex === -1) {
+      return res.status(400).json({
+        success: false,
+        message: "User is not in the room",
+      });
+    }
+
+    // Remove the user from the room's user list
+    room.users.splice(userIndex, 1);
+    await room.save();
+
+    // Update the user to indicate they are no longer in the room
+    userToRemove.inRoom = null;
+    await userToRemove.save();
+
+    // Emit an event to notify the user they have been removed
+    const { io } = req;
+    io.to(userToRemove.socketId).emit("You-are-removed");
+
+    return res.status(200).json({
+      success: true,
+      message: "User removed from the room successfully",
+    });
+  } catch (err) {
+    console.error("Error removing member:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: err.message,
+    });
+  }
+};
+
+const restrictMembers = async (req, res) => {
+  try {
+  } catch (err) {}
+};
+
+const changeRoomOwnership = async (req, res) => {
+  try {
+    const id = req?.params?.id;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required",
+      });
+    }
+
+    const givingOwnershipTo = await User.findOne({ _id: id });
+    if (!givingOwnershipTo) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    const email = req?.user?.email;
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    const roomId = user.inRoom;
+    if (!roomId) {
+      return res.status(400).json({
+        success: false,
+        message: "User is not in any room",
+      });
+    }
+
+    const room = await Room.findOne({ _id: roomId });
+    if (!room) {
+      return res.status(404).json({
+        success: false,
+        message: "Room not found",
+      });
+    }
+
+    const ownerId = room.roomAdmin.id;
+    if (ownerId.toString() !== user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized request",
+      });
+    }
+
+    const userIndex = room.users.findIndex(
+      (user) => user.toString() === id.toString()
+    );
+    if (userIndex === -1) {
+      return res.status(400).json({
+        success: false,
+        message: "User is not in the room",
+      });
+    }
+
+    // Transfer ownership
+    room.roomAdmin.id = givingOwnershipTo._id;
+    if (!room.users.includes(ownerId)) {
+      room.users.push(ownerId); // Add the old owner back to the room's user list if not already present
+    }
+    await room.save();
+
+    const socketId = givingOwnershipTo.socketId;
+    if (socketId) {
+      const { io } = req;
+      io.to(socketId).emit("became-room-owner");
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Room ownership transferred successfully",
+    });
+  } catch (err) {
+    console.error("Error in changeRoomOwnership controller:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: err.message,
+    });
+  }
+};
+
+module.exports = {
+  createRoom,
+  addMember,
+  askForRoomOwnership,
+  joinRoom,
+  deleteRoom,
+  removeMember,
+  restrictMembers,
+  changeRoomOwnership,
+  leaveRoom,
+};
