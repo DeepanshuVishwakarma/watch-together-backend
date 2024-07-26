@@ -1,5 +1,5 @@
-// Import the express module
-// Create an instance of an Express app
+const Room = require("./models/Room");
+const Message = require("./models/Message");
 const express = require("express");
 const database = require("./config/database");
 const { auth } = require("./middlewares/auth");
@@ -7,8 +7,6 @@ const cookieParser = require("cookie-parser");
 const fileUpload = require("express-fileupload");
 const cors = require("cors");
 const { userRoutes, videoRoutes, roomRoutes } = require("./routes/index");
-// const userRoutes = require("./routes/User");
-// const videoRoutes = require("./routes/Video");
 const dotenv = require("dotenv");
 const { cloudinaryConnect } = require("./config/cloudinary");
 const bodyParser = require("body-parser");
@@ -19,7 +17,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socket(server, {
   cors: {
-    origin: "*", // Allow all origins
+    origin: "*",
     methods: ["GET", "POST"],
   },
 });
@@ -57,7 +55,6 @@ const {
   isRoomAdmin,
   isCreatedByUser,
 } = require("./middlewares/socket-room-middleware");
-const Room = require("./models/Room");
 
 io.use(async (socket, next) => {
   console.log("inside socket authentication");
@@ -133,18 +130,21 @@ function removeUser(socketId) {
   }
 }
 
-function getCurrentRoomDetailsResponse(room, message) {
-  const { liveUsersDetails, liveAdminsDetails, usersCount } =
-    getRoomLiveUsersInfo(room);
+async function getCurrentRoomDetailsResponse(room, responseMessage) {
+  const { liveUsersDetails, liveAdminsDetails, usersCount, messages } =
+    await getRoomLiveUsersInfo(room);
+
+  // console.log("messages", messages);
   const response = {
     success: true,
-    message,
+    message: responseMessage,
     data: {
       // creator : room.createdBy ,
+      messages,
       crator: room.createdBy,
       roomName: room.roomName,
-      users: liveUsersDetails,
-      admins: liveAdminsDetails,
+      users: liveUsersDetails?.length > 0 ? liveUsersDetails : [],
+      admins: liveAdminsDetails?.length > 0 ? liveAdminsDetails : [],
       playlists: [],
       currentVideo: null,
       usersCount,
@@ -182,7 +182,31 @@ async function getRoomLiveUsersInfo(room) {
     }
   });
 
-  return { liveUsersDetails, liveAdminsDetails, usersCount };
+  const messages = await Message.find({ chatId: room._id })
+    .sort({ createdAt: 1 })
+    .lean();
+  const formattedMessages = messages.map((messageObj) => {
+    const sender = allUsers.find(
+      (user) => user._id.toString() === messageObj.sender.toString()
+    );
+    return {
+      _id: messageObj._id,
+      message: messageObj.message,
+      sender: {
+        _id: sender._id,
+        firstName: sender.firstName,
+        lastName: sender.lastName,
+      },
+      sentAt: new Date(messageObj.createdAt).toLocaleTimeString(),
+    };
+  });
+
+  return {
+    liveUsersDetails,
+    liveAdminsDetails,
+    usersCount,
+    messages: formattedMessages?.length ? formattedMessages : [],
+  };
 }
 
 io.on("connection", (socket) => {
@@ -213,7 +237,11 @@ io.on("connection", (socket) => {
         await isRoomExist(socket, next);
       }
 
-      if (event === "room:join" || event === "room:leave") {
+      if (
+        event === "room:join" ||
+        event === "room:leave" ||
+        event === "room:message"
+      ) {
         await isRoomExist(socket, next);
       }
       next();
@@ -239,12 +267,20 @@ io.on("connection", (socket) => {
         await room.save();
 
         const message = `room ${roomId} created successfully`;
-        const response = getCurrentRoomDetailsResponse(room, message);
-        io.to(roomId).emit("room:updated", response.data);
-        callback(response);
-        console.log(`Room created: ${roomId} rooms : ${rooms}`);
+
+        getCurrentRoomDetailsResponse(room, message)
+          .then((response) => {
+            console.log(response);
+            io.to(roomId).emit("room:updated", response.data);
+            callback(response);
+            console.log(`Room created: ${roomId} rooms : ${rooms}`);
+          })
+          .catch((error) => {
+            console.error("Error fetching room details:", error);
+            throw new Error("Error fetching room details ");
+          });
       } else {
-        socket.emit("error", { message: "Room already exists" });
+        throw new Error("room already exists");
       }
     } catch (err) {
       response = {
@@ -546,12 +582,16 @@ io.on("connection", (socket) => {
 
       const user = await User.findById(userIdToKick);
       const message = `${user.firstName} ${user.lastName} has been kicked from the room`;
-      const response = getCurrentRoomDetailsResponse(room, message);
-
+      getCurrentRoomDetailsResponse(room, message)
+        .then((response) => {
+          io.to(roomId).emit("room:updated", response.data);
+          callback(response);
+        })
+        .catch((error) => {
+          console.error("Error fetching room details:", error);
+          throw new Error("Error fetching room details ");
+        });
       // Emit the updated room details
-      io.to(roomId).emit("room:updated", response.data);
-
-      callback(response);
     } catch (err) {
       const response = {
         success: false,
@@ -592,9 +632,16 @@ io.on("connection", (socket) => {
 
       const user = await User.findById(userId);
       const message = `${user.firstName} ${user.lastName}'s permissions are changed`;
-      const response = getCurrentRoomDetailsResponse(room, message);
-      io.to(roomId).emit("room:updated", response.data);
-      callback(response);
+
+      getCurrentRoomDetailsResponse(room, message)
+        .then((response) => {
+          io.to(roomId).emit("room:updated", response.data);
+          callback(response);
+        })
+        .catch((error) => {
+          console.error("Error fetching room details:", error);
+          throw new Error("Error fetching room details ");
+        });
     } catch (err) {
       response = {
         success: false,
@@ -623,11 +670,6 @@ io.on("connection", (socket) => {
 
       const userId = socket.userDetails._id;
 
-      // check if the room is private
-      // if (!room.isPrivate) {
-      //   throw new Error("Room is not private, you can join directly");
-      // }
-
       // check if the user is already in the room
       if (room.users.includes(userId)) {
         throw new Error("You are already a member of this room");
@@ -635,7 +677,8 @@ io.on("connection", (socket) => {
 
       if (room.isPrivate) {
         // check if the user has already sent a join request
-        if (room.requests.some((request) => request.id.equals(userId))) {
+        if (room.requests.some((request) => request.equals(userId))) {
+          // `request.equals(userId)`
           throw new Error("Join request already sent");
         }
 
@@ -643,26 +686,34 @@ io.on("connection", (socket) => {
         room.requests.push(userId);
         await room.save();
 
-        // send sesponse for private room
-        response = {
+        // send response for private room
+        const response = {
           success: true,
           state: "requested",
-          message: "request sent successfully for " + room.roomName,
+          message: "Request sent successfully for " + room.roomName,
           data: room.users,
         };
         callback(response);
         return;
       }
+
+      // for non-private rooms, add the user directly to the users array
       room.users.push(userId);
-      response = {
+      await room.save();
+
+      const response = {
         success: true,
         state: "joined",
-        message: "request sent successfully for " + room.roomName,
-        data: {},
+        message: "Joined successfully to " + room.roomName,
+        data: room.users,
       };
       callback(response);
     } catch (err) {
-      callback(err);
+      const response = {
+        success: false,
+        message: err.message,
+      };
+      callback(response);
       console.error("Error sending join request:", err.message);
       socket.emit("error", { message: err.message });
     }
@@ -713,10 +764,14 @@ io.on("connection", (socket) => {
 
   socket.on("room:join", async (roomId, callback) => {
     try {
+      console.log("Inside join live room: ");
       if (!rooms[roomId]) {
+        console.log("No such room exists", rooms);
         throw new Error("No such room exists");
       }
       if (rooms[roomId].users.includes(userId)) {
+        console.log("User already in the room", rooms, roomId);
+
         throw new Error("User already in the room");
       }
 
@@ -725,25 +780,33 @@ io.on("connection", (socket) => {
         throw new Error("Room not found in database");
       }
 
-      if (
-        room.requests.some(
-          (request) => request.id.toString() === userId.toString()
-        )
-      ) {
-        throw new Error("User has already requested to join");
-      }
+      // if (
 
-      room.requests.push({ id: userId });
-      await room.save();
+      //     room?.requests.some((user) => user.equals(userId))
+
+      // ) {
+      //   throw new Error("User has already requested to join");
+      // }
+
+      // room.requests.push({ id: userId });
+      // await room.save();
 
       socket.join(roomId);
       rooms[roomId].users.push(userId);
 
       const user = await User.findById(userId);
       const message = `${user.firstName} ${user.lastName} has joined the room`;
-      const response = getCurrentRoomDetailsResponse(room, message);
-      io.to(roomId).emit("room:updated", response.data);
-      callback(response);
+      getCurrentRoomDetailsResponse(room, message)
+        .then((response) => {
+          // console.log(response);
+          io.to(roomId).emit("room:updated", response.data);
+          callback(response);
+          console.log("Join room executed");
+        })
+        .catch((error) => {
+          console.error("Error fetching room details:", error);
+          throw new Error("Error fetching room details ");
+        });
     } catch (err) {
       response = {
         success: false,
@@ -759,6 +822,7 @@ io.on("connection", (socket) => {
   socket.on("room:leave", async (roomId, callback) => {
     try {
       if (!rooms[roomId]) {
+        console.log("Roooms", rooms);
         throw new Error("No such room exists");
       }
 
@@ -778,18 +842,29 @@ io.on("connection", (socket) => {
       rooms[roomId].users = rooms[roomId].users.filter(
         (user) => user !== userId
       );
-      room.users = room.users.filter(
-        (user) => user.toString() !== userId.toString()
-      );
-      await room.save();
+      // room.users = room.users.filter(
+      //   (user) => user.toString() !== userId.toString()
+      // );
+      // await room.save();
 
       socket.leave(roomId);
 
       const user = await User.findById(userId);
       const message = `${user.firstName} ${user.lastName} has left the room`;
-      const response = getCurrentRoomDetailsResponse(room, message);
-      io.to(roomId).emit("room:updated", response.data);
-      callback(response);
+      // const response = getCurrentRoomDetailsResponse(room, message);
+      // io.to(roomId).emit("room:updated", response.data);
+      // callback(response);
+
+      getCurrentRoomDetailsResponse(room, message)
+        .then((response) => {
+          console.log(response);
+          io.to(roomId).emit("room:updated", response.data);
+          callback(response);
+        })
+        .catch((error) => {
+          console.error("Error fetching room details:", error);
+          throw new Error("Error fetching room details ");
+        });
     } catch (err) {
       response = {
         success: false,
@@ -799,6 +874,71 @@ io.on("connection", (socket) => {
       callback(response);
       console.error("Error leaving room:", err.message);
       socket.emit("error", { message: err.message });
+    }
+  });
+
+  socket.on("room:message", async (data, callback) => {
+    try {
+      // console.log("inside message", data);
+      const { roomId, message } = data;
+      // console.log("roomId: " + roomId);
+      const room = await Room.findById(roomId);
+      const userId = socket.userDetails._id;
+
+      const liveRoom = rooms[roomId];
+      // console.log(rooms, rooms?.roomId, rooms[roomId]);
+      if (!liveRoom) {
+        throw new Error("Room Is Not Live");
+      }
+
+      const liveUsrs = liveRoom.users;
+      if (!liveUsrs.includes(userId)) {
+        throw new Error("User Is Not Live");
+      }
+
+      const firstName = socket.userDetails.firstName;
+      const lastName = socket.userDetails.lastName;
+
+      const messageDoc = new Message({
+        sender: userId,
+        message,
+        chatId: roomId,
+      });
+
+      const messageSavedInMongo = await messageDoc.save();
+
+      const sentAt = messageSavedInMongo.createdAt;
+
+      const newMessage = {
+        _id: messageSavedInMongo._id,
+        message,
+        sender: {
+          _id: userId,
+          firstName,
+          lastName,
+        },
+        sentAt,
+      };
+
+      room.latestMessage = messageSavedInMongo._id;
+      await room.save();
+
+      io.to(roomId).emit("room:message", newMessage);
+      console.log(newMessage);
+      callback({
+        success: true,
+        message: "Message sent successfully",
+        data: newMessage,
+      });
+      //
+      console.log("done execution of message event");
+    } catch (err) {
+      callback({
+        success: false,
+        error: err,
+        message: err.message,
+      });
+      console.error(err);
     }
   });
 

@@ -25,6 +25,8 @@ exports.isRoomExist = async (req, res, next) => {
 
     req.room = room;
     next();
+
+    console.log("Next called");
   } catch (err) {
     console.error("Error in isRoomExist middleware:", err);
     return res.status(500).json({

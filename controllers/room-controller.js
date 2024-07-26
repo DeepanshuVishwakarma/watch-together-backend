@@ -3,6 +3,40 @@ const { RoomServices } = require("../services/index");
 const Room = require("../models/Room");
 
 //actions for all users
+
+const formatRoom = (room, userId, allUsers) => {
+  const isRequested = room?.requests.some((user) => user.equals(userId));
+  const isJoined = room?.users.some((user) => user.equals(userId));
+  const isAdmin = room?.admins.some((admin) => admin.equals(userId));
+  const isCreatedByUser = room?.createdBy.equals(userId);
+  const usersCount = room?.users?.length;
+
+  const roomUsers = allUsers.filter((user) =>
+    room?.users.some((userId) => userId.equals(user._id))
+  );
+  const roomAdmins = roomUsers.filter((user) =>
+    room?.admins.some((adminId) => adminId.equals(user._id))
+  );
+
+  const requestedUsers = allUsers.filter((user) =>
+    room?.requests.some((userId) => userId.equals(user._id))
+  );
+
+  return {
+    ...room,
+    admins: isCreatedByUser || isAdmin ? roomAdmins : undefined,
+    users: isCreatedByUser || isAdmin ? roomUsers : undefined,
+    requests: isCreatedByUser || isAdmin ? requestedUsers : undefined,
+    latestMessage: undefined,
+    invitation: undefined,
+    usersCount,
+    isJoined,
+    isAdmin,
+    isCreatedByUser,
+    isRequested,
+  };
+};
+
 const createRoom = async (req, res) => {
   // no room middleware is required
   console.log("inside createRoom");
@@ -91,39 +125,9 @@ const getAllRooms = async (req, res) => {
     // Fetch all users once to avoid multiple queries in the loop
     const allUsers = await User.find({}, "_id firstName lastName").lean();
 
-    const modifiedRooms = rooms.map((room) => {
-      const isRequested = room?.requests.some((user) =>
-        user.equals(currentUserId)
-      );
-      const isJoined = room?.users.some((user) => user.equals(currentUserId));
-      const isAdmin = room?.admins.some((admin) => admin.equals(currentUserId));
-      const isCreatedByUser = room?.createdBy.equals(currentUserId);
-      const usersCount = room?.users?.length;
-
-      const roomUsers = allUsers.filter((user) =>
-        room?.users.some((userId) => userId.equals(user._id))
-      );
-      const roomAdmins = roomUsers.filter((user) =>
-        room?.admins.some((adminId) => adminId.equals(user._id))
-      );
-
-      const requestedUsers = allUsers.filter((user) =>
-        room?.requests.some((userId) => userId.equals(user._id))
-      );
-      return {
-        ...room,
-        admins: isCreatedByUser || isAdmin ? roomAdmins : undefined,
-        users: isCreatedByUser || isAdmin ? roomUsers : undefined,
-        requests: isCreatedByUser || isAdmin ? requestedUsers : undefined,
-        latestMessage: undefined,
-        invitation: undefined,
-        usersCount,
-        isJoined,
-        isAdmin,
-        isCreatedByUser,
-        isRequested,
-      };
-    });
+    const modifiedRooms = rooms.map((room) =>
+      formatRoom(room, currentUserId, allUsers)
+    );
 
     return res.status(200).json({
       success: true,
@@ -216,7 +220,9 @@ const removeMember = async (req, res) => {
   // middle ware -> isRoomExits -> isCreatedByUser
 
   // yet to be completed
+
   try {
+    console.log("Inside Remove Member");
     const userId = req?.params?.userId;
     if (!userId) {
       return res.status(400).json({
@@ -225,7 +231,7 @@ const removeMember = async (req, res) => {
       });
     }
 
-    const userToRemove = await User.findOne({ _id: id });
+    const userToRemove = await User.findOne({ _id: userId });
     if (!userToRemove) {
       return res.status(404).json({
         success: false,
@@ -255,10 +261,13 @@ const removeMember = async (req, res) => {
     room.users.splice(userIndex, 1);
     await room.save();
 
+    // to send the reponse data
+    const allUsers = await User.find({}, "_id firstName lastName").lean();
+
     return res.status(200).json({
       success: true,
       message: "User removed from the room successfully",
-      data: room.users,
+      data: formatRoom(room, userId, allUsers),
     });
   } catch (err) {
     console.error("Error removing member:", err);

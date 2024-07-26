@@ -43,7 +43,7 @@ const isCreatedByUser = async (socket, next) => {
     const userId = socket.userDetails._id;
     const room = socket.room;
 
-    if (room.createdBy.toString() !== userId.toString()) {
+    if (room?.createdBy.toString() !== userId.toString()) {
       return next(new Error("Unauthorized request"));
     }
     next();
