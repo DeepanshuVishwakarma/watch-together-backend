@@ -140,6 +140,7 @@ async function getCurrentRoomDetailsResponse(room, responseMessage) {
     message: responseMessage,
     data: {
       // creator : room.createdBy ,
+      _id: room._id,
       messages,
       crator: room.createdBy,
       roomName: room.roomName,
