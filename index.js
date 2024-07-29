@@ -1,3 +1,5 @@
+const User = require("./models/User");
+const Video = require("./models/Videos");
 const Room = require("./models/Room");
 const Message = require("./models/Message");
 const express = require("express");
@@ -12,7 +14,6 @@ const { cloudinaryConnect } = require("./config/cloudinary");
 const bodyParser = require("body-parser");
 const http = require("http");
 const socket = require("socket.io");
-
 const app = express();
 const server = http.createServer(app);
 const io = socket(server, {
@@ -48,7 +49,6 @@ server.listen(PORT, () => {
 });
 
 const jwt = require("jsonwebtoken");
-const User = require("./models/User");
 
 const {
   isRoomExist,
@@ -134,7 +134,13 @@ async function getCurrentRoomDetailsResponse(room, responseMessage) {
   const { liveUsersDetails, liveAdminsDetails, usersCount, messages } =
     await getRoomLiveUsersInfo(room);
 
-  // console.log("messages", messages);
+  const liveVideoId = rooms[roomId]?.currentVideo;
+  let video = null;
+  console.log("LIVe video id found", liveVideoId);
+  if (liveVideoId) {
+    video = await Video.findById(liveVideoId);
+    console.log("Current vidoe is here: " + video);
+  }
   const response = {
     success: true,
     message: responseMessage,
@@ -147,7 +153,7 @@ async function getCurrentRoomDetailsResponse(room, responseMessage) {
       users: liveUsersDetails?.length > 0 ? liveUsersDetails : [],
       admins: liveAdminsDetails?.length > 0 ? liveAdminsDetails : [],
       playlists: [],
-      currentVideo: null,
+      currentVideo: video,
       usersCount,
     },
   };
@@ -874,7 +880,7 @@ io.on("connection", (socket) => {
       };
       callback(response);
       console.error("Error leaving room:", err.message);
-      socket.emit("error", { message: err.message });
+      // socket.emit("error", { message: err.message });
     }
   });
 
@@ -940,6 +946,135 @@ io.on("connection", (socket) => {
         message: err.message,
       });
       console.error(err);
+    }
+  });
+
+  socket.on("video:playPause", async (isPlaying) => {
+    try {
+      const roomId = socket.roomId;
+      const user = socket.userDetails;
+      const userId = user._id;
+      const room = await Room.findById(roomId);
+
+      if (!room) {
+        throw new Error("Room not found in database");
+      }
+      if (!rooms[roomId]) {
+        throw new Error("Room is not live");
+      }
+      if (!rooms[roomId].users.includes(userId)) {
+        throw new Error("user is not in the live room");
+      }
+
+      // const isCreator = room.creator.equals(userId);
+      const isAdmin = room.admins.includes(userId);
+      const hasPermission = room?.permissions?.player
+        ? true
+        : isAdmin
+        ? true
+        : false;
+      const data = {
+        userId,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        isPlaying,
+      };
+      if (hasPermission) {
+        io.to(roomId).emit("video:playPause", data);
+      } else {
+        throw new Error(
+          "Bad request , user is not allowed to play or pause video"
+        );
+      }
+    } catch (err) {
+      console.log(err);
+      const response = {
+        success: false,
+        error: err,
+        message: err.message,
+      };
+      callback(response);
+    }
+  });
+
+  socket.on("video:perfect-sync", async (data, callback) => {
+    try {
+      const roomId = socket.roomId;
+      const userId = socket.userDetails._id;
+      const room = await Room.findById(roomId);
+
+      if (!room) {
+        throw new Error("Room not found");
+      }
+      if (!rooms[roomId]) {
+        throw new Error("Room is not live");
+      }
+      if (!rooms[roomId].users.includes(userId)) {
+        throw new Error("user is not in the live room");
+      }
+
+      if (room.creator.equals(userId)) {
+        throw new Error(
+          "Bad request , creator can't join request to perfect-sync"
+        );
+      }
+
+      socket.emit("video:get-sync-details", null, (response) => {
+        if (response.success) {
+          callback(response);
+        } else {
+          throw new Error("Can't get video details from creator");
+        }
+      });
+    } catch (err) {
+      console.log(err);
+      const response = {
+        success: false,
+        error: err,
+        message: err.message,
+      };
+      callback(response);
+    }
+  });
+
+  socket.on("video:change", async (data) => {
+    try {
+      const { roomId, videoId } = data;
+
+      const userId = socket.userDetails._id;
+      const room = await Room.findById(roomId);
+
+      if (!room) {
+        throw new Error("room not found in database");
+      }
+      if (!rooms[roomId]) {
+        throw new Error("room is not live");
+      }
+      if (!rooms[roomId].users.includes(userId)) {
+        throw new Error("user is not in the live room");
+      }
+
+      if (!room.creator.equals(userId)) {
+        throw new Error("only creator can change the video");
+      }
+
+      const newRoomData = {
+        ...rooms[roomId],
+        currentVideo: videoId,
+      };
+      // update data here  of rooms[roomId]
+      const message = "Video changed successfully";
+      const response = await getCurrentRoomDetailsResponse(room, message);
+      io.to(roomId).emit("room:updated", response.data);
+      socket.emit("success", response);
+    } catch (err) {
+      console.log(err);
+      const response = {
+        success: false,
+        error: err,
+        message: err.message,
+      };
+      callback(response);
     }
   });
 
