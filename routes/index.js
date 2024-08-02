@@ -1,5 +1,8 @@
+console.log("here");
+
 module.exports = {
-  userRoutes: require("./User"),
+  userAuthRoutes: require("./user-auth"),
   videoRoutes: require("./Video"),
   roomRoutes: require("./Room"),
+  userRoutes: require("./User"),
 };

@@ -8,7 +8,12 @@ const { auth } = require("./middlewares/auth");
 const cookieParser = require("cookie-parser");
 const fileUpload = require("express-fileupload");
 const cors = require("cors");
-const { userRoutes, videoRoutes, roomRoutes } = require("./routes/index");
+const {
+  userAuthRoutes,
+  videoRoutes,
+  roomRoutes,
+  userRoutes,
+} = require("./routes/index");
 const dotenv = require("dotenv");
 const { cloudinaryConnect } = require("./config/cloudinary");
 const bodyParser = require("body-parser");
@@ -35,9 +40,10 @@ app.use(express.json());
 
 //cloudinary connection
 app.use("/api/v1/app", auth);
-app.use("/api/v1/auth", userRoutes);
+app.use("/api/v1/auth", userAuthRoutes);
 app.use("/api/v1/app/video", videoRoutes);
 app.use("/api/v1/app/room", roomRoutes);
+app.use("/api/v1/app/user", userRoutes);
 
 app.get("/", (req, res) => {
   res.send("Hello, world!");
@@ -55,15 +61,17 @@ const {
   isRoomAdmin,
   isCreatedByUser,
 } = require("./middlewares/socket-room-middleware");
+const userSocket = require("./sockets/user-socket");
+const { formatUserData } = require("./utils/helpers/addUserName");
 
 io.use(async (socket, next) => {
   console.log("inside socket authentication");
   const token = socket.handshake.query.token;
-  console.log(socket.handshake);
+  // console.log(socket.handshake);
   // "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImJpbkAxMjMiLCJpYXQiOjE3MjEwNTU1OTcsImV4cCI6MTcyMTE0MTk5N30.UP0QUGxn38StkLRxpqOt43lZwrR76OasJtQxdy6hzJY";
 
   if (!token) {
-    console.log("No token provided ", token);
+    // console.log("No token provided ", token);
     return next(new Error("Token Missing"));
   }
 
@@ -116,6 +124,10 @@ const rooms = {};
 
 const userToSocket = new Map();
 const socketToUser = new Map();
+module.exports = {
+  userToSocket,
+  socketToUser,
+};
 
 function addUser(user, socketId) {
   userToSocket.set(user._id.toString(), socketId);
@@ -131,15 +143,17 @@ function removeUser(socketId) {
 }
 
 async function getCurrentRoomDetailsResponse(room, responseMessage) {
+  // console.log("Inside getCurrentRoomDetailsResponse function");
   const { liveUsersDetails, liveAdminsDetails, usersCount, messages } =
     await getRoomLiveUsersInfo(room);
-
+  const roomId = room._id;
+  // console.log("got roomId ", roomId, "here is rooms details ", rooms[roomId]);
   const liveVideoId = rooms[roomId]?.currentVideo;
   let video = null;
-  console.log("LIVe video id found", liveVideoId);
+  // console.log("LIVe video id found", liveVideoId);
   if (liveVideoId) {
     video = await Video.findById(liveVideoId);
-    console.log("Current vidoe is here: " + video);
+    // console.log("Current vidoe is here: " + video);
   }
   const response = {
     success: true,
@@ -948,136 +962,402 @@ io.on("connection", (socket) => {
       console.error(err);
     }
   });
-
-  socket.on("video:playPause", async (isPlaying) => {
+  socket.on("video:playPause", async (data, callback) => {
     try {
-      const roomId = socket.roomId;
-      const user = socket.userDetails;
+      console.log("inside video playPause");
+      const { roomId, isPlaying } = data;
+      const user = await User.findById(socket.userDetails._id);
       const userId = user._id;
       const room = await Room.findById(roomId);
 
-      if (!room) {
-        throw new Error("Room not found in database");
-      }
-      if (!rooms[roomId]) {
-        throw new Error("Room is not live");
-      }
-      if (!rooms[roomId].users.includes(userId)) {
-        throw new Error("user is not in the live room");
-      }
+      if (!room) throw new Error("Room not found in database");
+      if (!rooms[roomId]) throw new Error("Room is not live");
+      if (!rooms[roomId].users.includes(userId))
+        throw new Error("User is not in the live room");
 
-      // const isCreator = room.creator.equals(userId);
       const isAdmin = room.admins.includes(userId);
-      const hasPermission = room?.permissions?.player
-        ? true
-        : isAdmin
-        ? true
-        : false;
-      const data = {
+      const hasPermission = room?.permissions?.player || isAdmin;
+
+      if (!hasPermission)
+        throw new Error("User is not allowed to play or pause video");
+
+      const playPauseData = {
         userId,
         firstName: user.firstName,
         lastName: user.lastName,
         isPlaying,
       };
-      if (hasPermission) {
-        io.to(roomId).emit("video:playPause", data);
-      } else {
-        throw new Error(
-          "Bad request , user is not allowed to play or pause video"
-        );
-      }
+
+      io.to(roomId).emit("video:playPause", playPauseData);
+
+      console.log("executed playPause");
     } catch (err) {
-      console.log(err);
-      const response = {
-        success: false,
-        error: err,
-        message: err.message,
-      };
+      console.error(err);
+      const response = { success: false, error: err, message: err.message };
       callback(response);
     }
   });
 
-  socket.on("video:perfect-sync", async (data, callback) => {
+  socket.on("video:perfect-sync", async (roomId, callback) => {
     try {
-      const roomId = socket.roomId;
-      const userId = socket.userDetails._id;
+      console.log("inside video perfect sync");
+
       const room = await Room.findById(roomId);
+      const user = await User.findById(socket.userDetails._id);
+      const userId = user._id;
 
-      if (!room) {
-        throw new Error("Room not found");
-      }
-      if (!rooms[roomId]) {
-        throw new Error("Room is not live");
-      }
-      if (!rooms[roomId].users.includes(userId)) {
-        throw new Error("user is not in the live room");
-      }
+      if (!room) throw new Error("Room not found");
+      if (!rooms[roomId]) throw new Error("Room is not live");
+      if (!rooms[roomId].users.includes(userId))
+        throw new Error("User is not in the live room");
 
-      if (room.creator.equals(userId)) {
-        throw new Error(
-          "Bad request , creator can't join request to perfect-sync"
+      if (room.createdBy.equals(userId))
+        throw new Error("Creator can't join request to perfect-sync");
+
+      const ownerId = room.createdBy.toString();
+      const ownerSocketId = userToSocket.get(ownerId);
+
+      if (ownerSocketId) {
+        console.log(
+          "Sending video:get-sync-details event to ownerSocketId:",
+          ownerSocketId
         );
-      }
+        const ownerSocket = io.sockets.sockets.get(ownerSocketId);
 
-      socket.emit("video:get-sync-details", null, (response) => {
-        if (response.success) {
-          callback(response);
+        if (ownerSocket) {
+          ownerSocket.emit("video:get-sync-details", { roomId }, (response) => {
+            console.log("Response received:", response);
+            if (response) {
+              if (response.success) {
+                callback(response);
+                console.log("executed perfect sync");
+              } else {
+                throw new Error("Can't get video details from creator");
+              }
+            } else {
+              throw new Error("No response received from creator");
+            }
+          });
         } else {
-          throw new Error("Can't get video details from creator");
+          throw new Error("Owner's socket instance not found");
         }
-      });
+      } else {
+        throw new Error("Owner's socketId not found");
+      }
     } catch (err) {
-      console.log(err);
-      const response = {
-        success: false,
-        error: err,
-        message: err.message,
-      };
+      console.error(err);
+      const response = { success: false, error: err, message: err.message };
       callback(response);
     }
   });
 
-  socket.on("video:change", async (data) => {
+  socket.on("video:change", async (data, callback) => {
     try {
+      console.log("inside video change");
       const { roomId, videoId } = data;
-
-      const userId = socket.userDetails._id;
+      const { _id: userId } = socket.userDetails;
       const room = await Room.findById(roomId);
 
-      if (!room) {
-        throw new Error("room not found in database");
-      }
-      if (!rooms[roomId]) {
-        throw new Error("room is not live");
-      }
-      if (!rooms[roomId].users.includes(userId)) {
-        throw new Error("user is not in the live room");
-      }
+      if (!room) throw new Error("Room not found in database");
+      if (!rooms[roomId]) throw new Error("Room is not live");
+      if (!rooms[roomId].users.includes(userId))
+        throw new Error("User is not in the live room");
 
-      if (!room.creator.equals(userId)) {
-        throw new Error("only creator can change the video");
-      }
+      if (!room.createdBy.equals(userId))
+        throw new Error("Only creator can change the video");
 
-      const newRoomData = {
-        ...rooms[roomId],
-        currentVideo: videoId,
-      };
-      // update data here  of rooms[roomId]
+      const newRoomData = { ...rooms[roomId], currentVideo: videoId };
+      rooms[roomId] = newRoomData;
+
       const message = "Video changed successfully";
-      const response = await getCurrentRoomDetailsResponse(room, message);
-      io.to(roomId).emit("room:updated", response.data);
-      socket.emit("success", response);
+
+      getCurrentRoomDetailsResponse(room, message)
+        .then((response) => {
+          io.to(roomId).emit("video:changed", response.data);
+          callback(response);
+          console.log("executed change");
+        })
+        .catch((error) => {
+          console.error("Error fetching room details:", error);
+          throw new Error("Error fetching room details");
+        });
     } catch (err) {
-      console.log(err);
-      const response = {
-        success: false,
-        error: err,
-        message: err.message,
-      };
+      console.error(err);
+      const response = { success: false, error: err, message: err.message };
       callback(response);
     }
   });
+  // userSocket(socket , userToSocket , socketToUser);
+  socket.on("sendFriendReq", async (newFriendId, callback) => {
+    try {
+      if (!newFriendId) throw new Error("New friend's ID must be specified");
 
+      const newFriend = await User.findById(newFriendId);
+      if (!newFriend)
+        throw new Error(
+          "User you are trying to send request not found in database"
+        );
+
+      const checkFriend = newFriend.requestFrom.find((friend) =>
+        friend.equals(newFriendId)
+      );
+      if (checkFriend) throw new Error("you have already sent request");
+
+      const user = await User.findById(socket.userDetails._id);
+      const checkUser = user.friends.find((friend) => friend.equals(friendId));
+      if (checkUser) throw new Error("User is already in your friend list");
+
+      await newFriend.requestFrom.push(user._id);
+      await newFriend.save();
+
+      console.log("userToSocket", userToSocket);
+
+      if (userToSocket) {
+        // const userSocketId = userToSocket.get(friendId);
+        const newFriendSocketId = userToSocket.get(newFriendId);
+        const data = {
+          _id: user._id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+        };
+        if (newFriendSocketId) {
+          console.log("emmited friend-request socket ");
+          const friendSocket = io.sockets.sockets.get(newFriendSocketId);
+          friendSocket.emit("friend-request", data);
+        }
+      } else {
+        console.error(
+          "userToSocket is not defined or does not have a get method"
+        );
+      }
+      formatUserData(user, newFriend)
+        .then((response) => {
+          const res = {
+            success: true,
+            message: "Request sent successfully",
+            data: response,
+          };
+          callback(res);
+        })
+        .catch(() => {
+          throw new Error("Couldn't formate user data");
+        });
+    } catch (error) {
+      console.error("Error in sendFriendReq:", error);
+      callback({ success: false, message: error.message });
+    }
+  });
+
+  socket.on("unsendFriendReq", async (newFriendId, callback) => {
+    try {
+      if (!newFriendId) throw new Error("New friend's ID must be specified");
+
+      const newFriend = await User.findById(newFriendId);
+      if (!newFriend)
+        throw new Error(
+          "User you are trying to unsend request not found in database"
+        );
+
+      const user = await User.findById(socket.userDetails._id);
+      if (!newFriend.requestFrom.includes(user._id))
+        throw new Error("No pending request found to unsend");
+
+      newFriend.requestFrom = newFriend.requestFrom.filter(
+        (id) => !id.equals(user._id)
+      );
+      await newFriend.save();
+
+      if (userToSocket && userToSocket.get) {
+        const newFriendSocketId = userToSocket.get(newFriendId);
+        const data = {
+          _id: user._id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+        };
+
+        if (newFriendSocketId) {
+          const friendSocket = io.sockets.sockets.get(newFriendSocketId);
+          friendSocket.emit("friend-request-unsend", data);
+          console.log("event emmited friend-request-unsend ", data);
+        }
+      } else {
+        console.error(
+          "userToSocket is not defined or does not have a get method"
+        );
+      }
+
+      formatUserData(user, newFriend)
+        .then((response) => {
+          const res = {
+            success: true,
+            message: "Request unsent successfully",
+            data: response,
+          };
+          callback(res);
+        })
+        .catch(() => {
+          throw new Error("Couldn't formate user data");
+        });
+    } catch (error) {
+      console.error("Error in unsendFriendReq:", error);
+      callback({ success: false, message: error.message });
+    }
+  });
+
+  socket.on("acceptFriendReq", async (friendId, callback) => {
+    try {
+      if (!friendId) throw new Error("Friend's ID must be specified");
+
+      const friend = await User.findById(friendId);
+      if (!friend)
+        throw new Error(
+          "User you are trying to accept request from not found in database"
+        );
+
+      const user = await User.findById(socket.userDetails._id);
+      const check = user.requestFrom.find((friend) => friend.equals(friendId));
+      console.log(user.requestFrom);
+      if (!check) throw new Error("No pending request found to accept");
+
+      user.friends.push(friendId);
+      friend.friends.push(user._id);
+
+      user.requestFrom = user.requestFrom.filter((id) => !id.equals(friendId));
+      await user.save();
+      await friend.save();
+
+      const userSocketId = userToSocket.get(friendId);
+      const data = {
+        _id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+      };
+
+      if (userSocketId) {
+        const userSocket = io.sockets.sockets.get(userSocketId);
+        userSocket.emit("friend-request-accepted", data);
+      }
+
+      const response = {
+        success: true,
+        message: "Friend request accepted successfully",
+        data: {
+          _id: friendId,
+          firstName: friend.firstName,
+          lastName: friend.lastName,
+        },
+      };
+      callback(response);
+    } catch (error) {
+      console.error("Error in acceptFriendReq:", error);
+      callback({ success: false, message: error.message });
+    }
+  });
+
+  socket.on("deleteFriendReq", async (friendId, callback) => {
+    try {
+      if (!friendId) throw new Error("Friend's ID must be specified");
+
+      const friend = await User.findById(friendId);
+      if (!friend)
+        throw new Error(
+          "User you are trying to delete request from not found in database"
+        );
+
+      const user = await User.findById(socket.userDetails._id);
+      const check = user.requestFrom.find((friend) => friend.equals(friendId));
+      console.log(user.requestFrom);
+      if (!check) throw new Error("No pending request found to delete");
+
+      user.requestFrom = user.requestFrom.filter((id) => !id.equals(friendId));
+      await user.save();
+
+      const userSocketId = userToSocket.get(friendId);
+
+      if (userSocketId) {
+        const userSocket = io.sockets.sockets.get(userSocketId);
+        const data = {
+          _id: user._id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+        };
+        userSocket.emit("friend-request-deleted", data);
+      }
+
+      const response = {
+        success: true,
+        message: "Friend request deleted successfully",
+        data: {
+          _id: friendId,
+          firstName: friend.firstName,
+          lastName: friend.lastName,
+        },
+      };
+
+      callback(response);
+    } catch (error) {
+      console.error("Error in deleteFriendReq:", error);
+      callback({ success: false, message: error.message });
+    }
+  });
+  // Delete Friend
+  socket.on("deleteFriend", async (friendId, callback) => {
+    try {
+      if (!friendId) throw new Error("Friend's ID must be specified");
+
+      const friend = await User.findById(friendId);
+      if (!friend)
+        throw new Error("User you are trying to delete not found in database");
+
+      const user = await User.findById(socket.userDetails._id);
+
+      const check = user.friends.find((friend) => friend.equals(friendId));
+      console.log(user?.friends, friendId);
+      if (!check) {
+        throw new Error("User is not in your friend list");
+      }
+
+      user.friends = user.friends.filter((id) => !id.equals(friendId));
+
+      friend.friends = friend.friends.filter((id) => !id.equals(user._id));
+
+      await user.save();
+      await friend.save();
+
+      if (userToSocket && userToSocket.get) {
+        // const userSocketId = userToSocket.get(friendId);
+        const newFriendSocketId = userToSocket.get(friendId);
+        const data = {
+          _id: user._id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+        };
+
+        if (newFriendSocketId) {
+          const friendSocket = io.sockets.sockets.get(newFriendSocketId);
+          friendSocket.emit("friend-deleted", data);
+        }
+      } else {
+        console.error(
+          "userToSocket is not defined or does not have a get method"
+        );
+      }
+      const data = {
+        _id: friendId,
+        firstName: friend.firstName,
+        lastName: friend.lastName,
+      };
+      const response = {
+        success: true,
+        message: "Friend deleted successfully",
+        data: data,
+      };
+      callback(response);
+    } catch (error) {
+      console.error("Error in deleteFriend:", error);
+      callback({ success: false, message: error.message });
+    }
+  });
   socket.on("disconnect", () => {
     console.log("client disconnected", socket.id);
     removeUser(userId);

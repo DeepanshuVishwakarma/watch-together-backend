@@ -14,6 +14,13 @@ class VideoRepository extends CrudRepository {
   async deleteManyByUploader(uploaderId) {
     return this.deleteMany({ uploadedBy: uploaderId });
   }
+  async getAllByUploader(uploaderId) {
+    const response = await this.model.find({
+      uploadedBy: uploaderId,
+      isPrivate: false,
+    });
+    return response;
+  }
 }
 
 module.exports = VideoRepository;

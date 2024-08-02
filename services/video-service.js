@@ -129,6 +129,17 @@ const deleteAllByCurrentUser = async (id) => {
   }
 };
 
+const getAllByCurrentUser = async (id) => {
+  try {
+    console.log("inside getAllByCurrentUser service : " + "id " + id);
+    const response = await videoRepository.getAllByUploader(id);
+    return successResponse(response);
+  } catch (error) {
+    console.log("error service : " + error);
+    return serverError(error);
+  }
+};
+
 const updateById = async (id, updateData) => {
   try {
     console.log("Inside updateById service");
@@ -161,4 +172,5 @@ module.exports = {
   deleteVideoById,
   deleteAllByCurrentUser,
   updateById,
+  getAllByCurrentUser,
 };

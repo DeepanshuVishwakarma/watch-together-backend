@@ -1,17 +1,10 @@
-const express = require('express'); 
-const router = express.Router(); 
+const express = require("express");
+const router = express.Router();
+const { UserController } = require("../controllers/index");
 
-const {
-    login , 
-    signup 
-} =require("../controllers/Auth");
-
-const { auth } = require("../middlewares/auth")
-
-router.post("/login", login);
-router.post('/signup', signup);
-
-
-
+router.get("/search/:name", UserController.searchUserByName); // it should contain "firstName LastName"
+router.get("/get/:id", UserController.getUserById);
+router.delete("/delete", UserController.deleteUser);
+router.post("/update", UserController.update);
 
 module.exports = router;

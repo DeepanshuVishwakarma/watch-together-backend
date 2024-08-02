@@ -64,6 +64,7 @@ const userSchema = new mongoose.Schema({
   socketId: {
     type: String,
   },
+  roomInvites: {},
 });
 
 module.exports = mongoose.model("User", userSchema);
